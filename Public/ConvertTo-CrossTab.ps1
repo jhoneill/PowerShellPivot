@@ -125,6 +125,5 @@ function ConvertTo-CrossTab {
             $r[$RowName] = $_
             [pscustomobject]$r
         } | Select-Object -Property $OutputProperties
-
     }
 }

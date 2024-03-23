@@ -27,13 +27,17 @@ function Get-Subtotal  {
         #The property name(s) to aggregate - if none is specified items are counted
         [Parameter(Position=1)]
         $ValueName,
-        #The data to subtotal
+        #The data to subtotal 'Character', 'Line', 'Word' use Measure-object, the rest use code that extends the Group object
+        # 'Average', 'CountValues',  'Sum', 'Max', 'Min', 'Std' and  'Var' don't use any addition code, but use [MathNet.Numerics.Statistics] is needed for
+        # 'Entropy', 'Mean', 'GeometricMean', 'HarmonicMean',  'Median' 'RootMeanSquare', 'Quantile', 'LowerQuartile', 'UpperQuartile',
+        # 'StandardDeviation', 'PopulationStandardDeviation',  'Variance', and 'PopulationVariance'
         [Parameter(Position=2)]
-        [ValidateSet('Average', 'Count',  'Sum', 'Max', 'Min', 'Mean', 'Entropy', 'GeometricMean', 'HarmonicMean',  'Median',
-                     'Quantile', 'LowerQuartile', 'UpperQuartile', 'RootMeanSquare',
-                     'StandardDeviation', 'PopulationStandardDeviation', 'std', 'Variance', 'PopulationVariance',
+        [ValidateSet('Average', 'CountValues',  'Sum', 'Max', 'Min', 'Std', 'Var',
+                     'Entropy', 'Mean', 'GeometricMean', 'HarmonicMean',  'Median',
+                     'RootMeanSquare', 'Quantile', 'LowerQuartile', 'UpperQuartile',
+                     'StandardDeviation', 'PopulationStandardDeviation',  'Variance', 'PopulationVariance',
                      'AllStats',  'Character', 'Line', 'Word')]
-        [String[]]$AggregateFunction = @('Average'),
+        [String[]]$AggregateFunction = @('Sum'),
 
         [Parameter(ValueFromPipeline=$true)]
         $InputObject,
@@ -41,21 +45,25 @@ function Get-Subtotal  {
         [Alias('NoPrefix','NoSuffix')]
         [switch]$SimpleName,
 
-        #Equivalent to adding count to -AggregateFunction
+        #The swtiches for "Count", "Average", "Maximum", "Minimum", "StandardDeviation", "Sum", "Character", "Line" and "Word" make calling from convertToCrossTab easier
+        #-Sum is equivalent to adding Sum to $AggregateFunction
+        [switch]$Sum,
+        #Equivalent to adding countValues (not count) to -AggregateFunction
         [switch]$Count,
-        #Equivalent to adding AllStats to -AggregateFunction -selects "Min", "Max", "Average", "STD", "Sum" and, "Count"
-        [switch]$AllStats,
-        #Equivalent to adding Average to AggregateFunction (mean and average do the same job in AggregateFunction)
-        [switch]$Average,
         #Equivalent to adding max (not 'Maximum') to -AggregateFunction
         [switch]$Maximum,
         #Equivalent to adding min (not 'Minimum') to -AggregateFunction
         [switch]$Minimum,
-        #Equivalent to adding count to $AggregateFunction
+        #Equivalent to adding Average to AggregateFunction (average doesn't need [MathNet.Numerics.Statistics] , mean does )
+        [switch]$Average,
+        #Equivalent to adding Std (not StandardDeviation) to $AggregateFunction (std doesn't need [MathNet.Numerics.Statistics] , StandardDeviation does )
+        [Alias('Std')]
         [switch]$StandardDeviation,
-        #Equivalent to adding Sum to $AggregateFunction
-        [switch]$Sum,
-         #Equivalent to adding word to -AggregateFunction - uses Measure-Object to count Characters
+        #Equivalent to adding var (not variance) to $AggregateFunction  (var doesn't need [MathNet.Numerics.Statistics] , variance does )
+        [switch]$Var,
+        #Equivalent to adding AllStats to -AggregateFunction -selects "Min", "Max", "Average", "STD", "Sum" and, "Count"
+        [switch]$AllStats,
+         #Equivalent to adding Character to -AggregateFunction - uses Measure-Object to count Characters
         [switch]$Character,
          #Equivalent to adding word to -AggregateFunction - uses Measure-Object to count Lines
         [switch]$Line,
@@ -64,55 +72,69 @@ function Get-Subtotal  {
         # Ignores whitespace when measuring Chars words or lines
         [switch]$IgnoreWhiteSpace
     )
-    begin   {$data   = @()}
-    process {$data  += $inputObject }
-    end {
-        #Allow switches for common options
-         if ((-not $PSBoundParameters["AggregateFunction"]) -and ($Minimum -or $Maximum -or $Count -or $AllStats -or $Average -or $StandardDeviation -or $sum -or $Character -or $line -or $word )) {
-            $AggregateFunction = @()
+    begin   {
+        #region Allow switches for common options - if nothing was passed as a switch or as -AggregateFunction the default value will take over, but if a swtch was passed removed the default
+         if ((-not $PSBoundParameters["AggregateFunction"]) -and ($Minimum -or $Maximum -or $CountValues -or $AllStats -or $Average -or $StandardDeviation -or $sum -or $Character -or $line -or $word )) {
+             $AggregateFunction = @()
         }
-        if ($Minimum -and $AggregateFunction -notcontains "Min" ) {$AggregateFunction += "Min"}
-        if ($Maximum -and $AggregateFunction -notcontains "Max" ) {$AggregateFunction += "Max"}
-        foreach ($p in @("Count", "AllStats", "Average", "StandardDeviation", "Sum", "Character", "Line", "Word")) {
-            if ($PSBoundParameters[$p] -and $AggregateFunction -notcontains $P) {$AggregateFunction += $p}
+        if ( $Count                    -and $AggregateFunction -notcontains "CountValues" ) {$AggregateFunction += "CountValues"}
+        if ( $Minimum                  -and $AggregateFunction -notcontains "Min"         ) {$AggregateFunction += "Min"}
+        if ( $Maximum                  -and $AggregateFunction -notcontains "Max"         ) {$AggregateFunction += "Max"}
+        if ( $StandardDeviation        -and $AggregateFunction -notcontains "Std"         ) {$AggregateFunction += "Std"}
+        foreach ($p in @("AllStats", "Average", "Var", "Sum", "Character", "Line", "Word")) {
+            if ($PSBoundParameters[$p] -and $AggregateFunction -notcontains  $P)             {$AggregateFunction += $p}
         }
-        if ($AggregateFunction.Count -gt 1 -and $GroupByName.count -gt 1 -and $SimpleName) {
-            Write-Warning "NoPrefix ignored whene there are multiple aggregations"
-        }
+        #endregion
+
+        #region divide parameters into those done using measure and those done with type extensions to the group object.
         $measureParams = $AggregateFunction.where({$_ -in    ("Line", "Character", "Word") })
-        if     ($IgnoreWhiteSpace -and -not $measureParams) {$measureParams = @('Character', 'IgnoreWhiteSpace' ) }
-        elseif ($IgnoreWhiteSpace ) {$measureParams += 'IgnoreWhiteSpace' }
+        if     ($IgnoreWhiteSpace -and -not $measureParams) {$measureParams  = @('Character', 'IgnoreWhiteSpace' ) }
+        elseif ($IgnoreWhiteSpace )                         {$measureParams +=                'IgnoreWhiteSpace'   }
+        if ($SimpleName -and $measureParams) {
+            Write-Warning "Simple name option is ignored for text counts."
+        }
+
         $groupParams = $AggregateFunction.where({$_ -Notin ("Line", "Character", "Word", "AllStats") })
-        if ($AggregateFunction -contains 'AllStats') {$groupParams = "Min", "Max", "Average", "STD", "Sum", "Count"}
+        if ($AggregateFunction -contains 'AllStats') {
+            if ($groupParams) {Write-Warning 'AllStats overrides other Aggregate functions'}
+            $groupParams = "Min", "Max", "Average", "STD", "Sum", "Count"
+        }
+        if ($measureParams -and $groupParams ) {
+            Write-Warning "Can't use mathematical and textual functions, matematical ones will be ignroed"
+        }
+        if ($SimpleName    -and $groupParams.Count -gt 1 -and $GroupByName.count -gt 1 ) {
+            Write-Warning "Simple name option is ignored when there are multiple aggregations."
+        }
+        #endregion
+
+        $data   = @()
+    }
+    process {
+        $data  += $inputObject
+    }
+    end {
         $data | Group-Object -Property $GroupByName | ForEach-Object {
             $newobj = [Ordered]@{}
             #For whatever we grouped on, get that value/those values from the first row of each group. Then total the properties we're interested in
-            foreach ($g in $GroupByName) {$newobj[$g] = $_.Group[0].$g }
-            if (-not $ValueName) {
-                $newobj['Count'] = $_.Group.Count
-            }
+            foreach ($g in $GroupByName) {$newobj[$g]      = $_.Group[0].$g }
+            if (-not       $ValueName)   {$newobj['Count'] = $_.Group.Count}
             foreach ($v in $ValueName)   {
                 #Some objects may not have all the properties e.g. Dir | measure length
-                if ($measureParams) {
+                if     ($measureParams)  {
                     $totals =  $_.Group | Measure-object -Property $v @measureParams -ErrorAction SilentlyContinue
                     foreach ($agFn  in $measureParams.Keys.where({$_  -ne 'IgnoreWhiteSpace'}))  {
                         $newObj[($v + "_" + $agfn + "s")] = $totals."$agFn`s"
                     }
                 }
-                elseif ($groupParams) {
+                elseif ($groupParams)    {
                     if     ($groupParams.Count -eq 1 -and $SimpleName) {
-                            $agFn = $groupParams[0]
-                            $newObj[$v] = $_.$agFn($v)
+                            $agFn       = $groupParams[0];   $newObj[$v]                 = $_.$agFn($v)
                     }
                     elseif ($GroupByName.count -eq 1 -and $SimpleName) {
-                        foreach ($agFn in $groupParams)  {
-                            $newObj[$agfn] = $_.$agFn($v)
-                        }
+                        foreach ($agFn in $groupParams)  {   $newObj[$agfn]              = $_.$agFn($v)}
                     }
                     else {
-                        foreach ($agFn in $groupParams)  {
-                            $newObj[($agfn + "_" + $v )] = $_.$agFn($v)
-                        }
+                        foreach ($agFn in $groupParams)  {  $newObj[($agfn + "_" + $v )] = $_.$agFn($v)}
                     }
                 }
             }
